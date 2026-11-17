@@ -1,4 +1,15 @@
 import { readProfileSet } from '../storage/proposalProfiles.js'
+import {
+  getPullPolicy,
+  savePullPolicy,
+  listPullSchedules,
+  savePullSchedule,
+  deletePullSchedule,
+  listRecentPullRuns,
+  getPullStatsHourly,
+  defaultPullPolicy
+} from '../storage/pullPolicies.js'
+import type { PullPolicy, PullSchedule } from '../shared/trends.js'
 import { validProfileId } from '../shared/proposalProfiles.js'
 import { recordStartupFailure } from './startupFailure.js'
 import { SearchService } from './search/service.js'
@@ -2588,6 +2599,39 @@ function registerIpc(): void {
       else await shell.openExternal(url)
       return { ok: true }
     } catch { return { ok: false, error: 'open-failed' } }
+  })
+  ipcMain.handle(IPC.getPullPolicy, (_event, v: { platform?: unknown }) => {
+    return db && typeof v?.platform === 'string' ? getPullPolicy(db, v.platform) : defaultPullPolicy('default')
+  })
+  ipcMain.handle(IPC.savePullPolicy, (_event, v: { policy?: unknown }) => {
+    if (!db || !v?.policy) return { ok: false }
+    savePullPolicy(db, v.policy as PullPolicy)
+    return { ok: true }
+  })
+  ipcMain.handle(IPC.listPullSchedules, () => (db ? listPullSchedules(db) : []))
+  ipcMain.handle(IPC.savePullSchedule, (_event, v: { schedule?: unknown }) => {
+    if (!db || !v?.schedule) return { ok: false }
+    savePullSchedule(db, v.schedule as PullSchedule)
+    return { ok: true }
+  })
+  ipcMain.handle(IPC.deletePullSchedule, (_event, v: { id?: unknown }) => {
+    if (!db || typeof v?.id !== 'string') return { ok: false }
+    return { ok: deletePullSchedule(db, v.id) }
+  })
+  ipcMain.handle(IPC.triggerPullNow, async (_event, v: { platform?: unknown }) => {
+    const platform = typeof v?.platform === 'string' ? v.platform : 'mostaql'
+    if (platform === 'mostaql') scheduleNext()
+    else if (platform === 'khamsat') scheduleKhamsat(0)
+    else if (platform === 'nafezly') scheduleNafezly(0)
+    return { ok: true }
+  })
+  ipcMain.handle(IPC.listPullRuns, (_event, v: { platform?: unknown; limit?: unknown }) => {
+    return db ? listRecentPullRuns(db, typeof v?.platform === 'string' ? v.platform : undefined, typeof v?.limit === 'number' ? v.limit : 50) : []
+  })
+  ipcMain.handle(IPC.getPullStats, (_event, v: { platform?: unknown; fromHourMs?: unknown; toHourMs?: unknown }) => {
+    return db && typeof v?.platform === 'string' && typeof v?.fromHourMs === 'number' && typeof v?.toHourMs === 'number'
+      ? getPullStatsHourly(db, v.platform, v.fromHourMs, v.toHourMs)
+      : []
   })
   ipcMain.handle(IPC.getAppInfo, () => ({ version: testHarness?.appVersion ?? APP_VERSION, platform: process.platform, arch: process.arch }))
   ipcMain.handle(IPC.openCompact, () => {

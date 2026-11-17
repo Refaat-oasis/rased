@@ -17,6 +17,7 @@ import type {
   WatchSetResult,
   WatchSource
 } from './projectWatch.js'
+import type { PullPolicy, PullSchedule, PullRun, PullStatsHourly } from './trends.js'
 // Typed renderer<->main contract. Implemented in preload, consumed by the
 // renderer through `window.rased`. Keep in shared so both sides agree.
 
@@ -193,6 +194,15 @@ export interface RasedApi {
   windowControl(action: 'minimize' | 'maximize' | 'close'): Promise<void>
   getWindowState(): Promise<{ maximized: boolean; minimized: boolean }>
   onWindowState(cb: (state: { maximized: boolean }) => void): () => void
+  // Trends & Pull Policy (Phase 1)
+  getPullPolicy(platform: string): Promise<PullPolicy>
+  savePullPolicy(policy: PullPolicy): Promise<MutationResult>
+  listPullSchedules(): Promise<PullSchedule[]>
+  savePullSchedule(schedule: PullSchedule): Promise<MutationResult>
+  deletePullSchedule(id: string): Promise<MutationResult>
+  triggerPullNow(platform: string): Promise<MutationResult>
+  listPullRuns(platform?: string, limit?: number): Promise<PullRun[]>
+  getPullStats(platform: string, fromHourMs: number, toHourMs: number): Promise<PullStatsHourly[]>
   getAppInfo(): Promise<AppInfo>
   openAboutLink(link: AboutLink): Promise<MutationResult>
   confirmClose(quit: boolean): Promise<void>
