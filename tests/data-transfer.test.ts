@@ -7,6 +7,7 @@ import { defaultSettings } from '../src/shared/types.js'
 import { importSettings, parseSettingsTransfer, settingsPayload, TRANSFER_SETTINGS_KEYS } from '../src/storage/settingsTransfer.js'
 import { getSettingRaw, setSettingRaw, upsertProjectsBatch, updateUserState, upsertProjectDetails, saveSavedFilterRow } from '../src/storage/repositories.js'
 import { createPortableBackup, inspectBackup, restoreDatabase } from '../src/storage/backups.js'
+import { SCHEMA_VERSION } from '../src/storage/migrations.js'
 import { saveProposalDraft, getProposalDraft } from '../src/storage/proposalDrafts.js'
 import { issueNotificationActivation, claimNotificationActivation } from '../src/storage/notificationActivations.js'
 import { rebuildSearchBatch } from '../src/storage/searchCache.js'
@@ -219,7 +220,7 @@ describe('Complete portable backups', () => {
 
     const file = join(folder, 'v11.rased-backup')
     const inspected = await createPortableBackup(source, file, '0.11.0')
-    expect(inspected.manifest.schemaVersion).toBe(11)
+    expect(inspected.manifest.schemaVersion).toBe(SCHEMA_VERSION)
 
     const archive = openDatabase(file); databases.push(archive)
     expect(archive.prepare("SELECT last_error FROM project_watch WHERE project_id = 1").get()).toEqual({ last_error: null })
@@ -255,10 +256,10 @@ describe('Complete portable backups', () => {
     source.prepare("INSERT INTO project_watch (project_id, state, origin, started_at) VALUES (1, 'active', 'test', '2026-10-01T11:00:00.000Z')").run()
     const file = join(folder, 'canonical-watch.rased-backup')
     const inspected = await createPortableBackup(source, file, '0.11.0')
-    expect(inspected.manifest.schemaVersion).toBe(11)
+    expect(inspected.manifest.schemaVersion).toBe(SCHEMA_VERSION)
 
     // Canonical archive inspects successfully
-    expect(inspectBackup(file).manifest.schemaVersion).toBe(11)
+    expect(inspectBackup(file).manifest.schemaVersion).toBe(SCHEMA_VERSION)
 
     // Tamper with archive to insert non-canonical started_at: '2026-10-01T11:00:00-02:00'
     const archive = openDatabase(file); databases.push(archive)
@@ -306,8 +307,8 @@ describe('Complete portable backups', () => {
     expect(target.prepare("SELECT title FROM projects").all()).toEqual([{ title: 'Source P1' }])
     expect(target.prepare("SELECT state, origin FROM project_watch").all()).toEqual([{ state: 'active', origin: 'from-source' }])
   })
-  it('accepts and restores version 10, 9, and 8 archives with legacy semantics', async () => {
-    for (const ver of [10, 9, 8] as const) {
+  it('accepts and restores version 11, 10, 9, and 8 archives with legacy semantics', async () => {
+    for (const ver of [11, 10, 9, 8] as const) {
       const folder = profile(), source = database(folder); seed(source)
       source.prepare("INSERT INTO notification_events (project_id, kind, status, dedupe_key, created_at, updated_at) VALUES (1, 'new_project', 'pending', '', ?, ?)").run(now, now)
       const file = join(folder, `v${ver}.rased-backup`)
@@ -316,7 +317,8 @@ describe('Complete portable backups', () => {
       const old = openDatabase(file); databases.push(old)
       const manifest = JSON.parse(String(old.prepare('SELECT json FROM rased_backup_manifest').get()!.json)) as { schemaVersion: number }
       manifest.schemaVersion = ver
-      downgradeToSchema10(old)
+      if (ver < 12) downgradeToSchema11(old)
+      if (ver < 11) downgradeToSchema10(old)
       if (ver < 10) removeSearchSchema(old)
       if (ver === 8) old.exec('DROP TABLE notification_activations;')
       old.exec(`PRAGMA user_version = ${ver};`)
@@ -450,10 +452,10 @@ describe('Complete portable backups', () => {
     const dbGood = openDatabase(f9); databases.push(dbGood)
     dbGood.prepare("INSERT INTO project_watch (project_id, state, origin, started_at) VALUES (1, 'active', 'list', '2026-10-01T13:00:00.000Z')").run()
     dbGood.close()
-    expect(inspectBackup(f9).manifest.schemaVersion).toBe(11)
+    expect(inspectBackup(f9).manifest.schemaVersion).toBe(SCHEMA_VERSION)
   })
 })
-import { downgradeToSchema10, removeSearchSchema } from './helpers/oldSchema.js'
+import { downgradeToSchema11, downgradeToSchema10, removeSearchSchema } from './helpers/oldSchema.js'
 
 describe('device-local standing consent portability', () => {
   const consent = JSON.stringify({ version: 1, provider: 'openai', model: 'example-model', keyRevision: 'local-revision', grantedAt: '2026-10-23T00:00:00.000Z' })

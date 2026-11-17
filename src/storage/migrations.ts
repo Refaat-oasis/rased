@@ -308,6 +308,209 @@ const MIGRATIONS: string[] = [
   ALTER TABLE notification_events_v11 RENAME TO notification_events;
   CREATE INDEX idx_notify_status ON notification_events(status);
   ALTER TABLE notification_activations ADD COLUMN origin TEXT NOT NULL DEFAULT 'notification';
+  `,
+  /* 12 */ `
+  ALTER TABLE projects ADD COLUMN first_pull_run_id TEXT;
+
+  CREATE TABLE IF NOT EXISTS project_facts_norm (
+    project_id INTEGER PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+    budget_min REAL,
+    budget_max REAL,
+    budget_currency TEXT,
+    duration_days INTEGER,
+    fetched_at INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS taxonomy_nodes (
+    id TEXT PRIMARY KEY,
+    parent_id TEXT REFERENCES taxonomy_nodes(id) ON DELETE CASCADE,
+    dimension TEXT NOT NULL,
+    name_ar TEXT NOT NULL,
+    name_en TEXT NOT NULL,
+    is_active INTEGER NOT NULL DEFAULT 1,
+    sort_order INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE INDEX IF NOT EXISTS idx_taxonomy_parent ON taxonomy_nodes(parent_id);
+  CREATE INDEX IF NOT EXISTS idx_taxonomy_dim ON taxonomy_nodes(dimension, is_active);
+
+  CREATE TABLE IF NOT EXISTS taxonomy_keywords (
+    id TEXT PRIMARY KEY,
+    node_id TEXT NOT NULL REFERENCES taxonomy_nodes(id) ON DELETE CASCADE,
+    keyword TEXT NOT NULL,
+    weight REAL NOT NULL DEFAULT 1.0,
+    match_mode TEXT NOT NULL DEFAULT 'word',
+    case_sensitive INTEGER NOT NULL DEFAULT 0,
+    requires_context TEXT,
+    is_exclusion INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE INDEX IF NOT EXISTS idx_taxonomy_kw_node ON taxonomy_keywords(node_id);
+  CREATE INDEX IF NOT EXISTS idx_taxonomy_kw_lookup ON taxonomy_keywords(keyword);
+
+  CREATE TABLE IF NOT EXISTS taxonomy_inferences (
+    source_node_id TEXT NOT NULL REFERENCES taxonomy_nodes(id) ON DELETE CASCADE,
+    target_node_id TEXT NOT NULL REFERENCES taxonomy_nodes(id) ON DELETE CASCADE,
+    confidence REAL NOT NULL DEFAULT 1.0,
+    PRIMARY KEY (source_node_id, target_node_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS project_labels (
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    node_id TEXT NOT NULL REFERENCES taxonomy_nodes(id) ON DELETE CASCADE,
+    dimension TEXT NOT NULL,
+    is_primary INTEGER NOT NULL DEFAULT 0,
+    score REAL NOT NULL DEFAULT 0,
+    source TEXT NOT NULL,
+    PRIMARY KEY (project_id, node_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_labels_node ON project_labels(node_id, project_id);
+  CREATE INDEX IF NOT EXISTS idx_labels_dim ON project_labels(dimension, project_id);
+
+  CREATE TABLE IF NOT EXISTS project_nlp_state (
+    project_id INTEGER PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+    text_hash TEXT NOT NULL,
+    taxonomy_version INTEGER NOT NULL,
+    confidence REAL NOT NULL,
+    status TEXT NOT NULL,
+    dup_group_id TEXT,
+    classified_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_nlp_status ON project_nlp_state(status, confidence);
+  CREATE INDEX IF NOT EXISTS idx_nlp_dup ON project_nlp_state(dup_group_id);
+
+  CREATE TABLE IF NOT EXISTS daily_stats (
+    day TEXT NOT NULL,
+    platform TEXT NOT NULL,
+    node_id TEXT NOT NULL REFERENCES taxonomy_nodes(id) ON DELETE CASCADE,
+    jobs INTEGER NOT NULL,
+    PRIMARY KEY (day, platform, node_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS daily_coverage (
+    day TEXT NOT NULL,
+    platform TEXT NOT NULL,
+    covered_minutes INTEGER NOT NULL,
+    deep_synced INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, platform)
+  );
+
+  CREATE TABLE IF NOT EXISTS term_stats_daily (
+    day TEXT NOT NULL,
+    term TEXT NOT NULL,
+    df INTEGER NOT NULL,
+    PRIMARY KEY (day, term)
+  );
+
+  CREATE TABLE IF NOT EXISTS emerging_topics (
+    id TEXT PRIMARY KEY,
+    label TEXT NOT NULL,
+    top_terms_json TEXT NOT NULL,
+    first_seen_day TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'new',
+    mapped_node_id TEXT REFERENCES taxonomy_nodes(id) ON DELETE SET NULL,
+    updated_at INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS analytics_presets (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    filter_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS pull_policy (
+    platform TEXT PRIMARY KEY,
+    mode TEXT NOT NULL DEFAULT 'interval',
+    interval_seconds INTEGER NOT NULL DEFAULT 300,
+    active_from TEXT,
+    active_to TEXT,
+    off_hours_interval_seconds INTEGER,
+    adaptive INTEGER NOT NULL DEFAULT 0,
+    adaptive_max_seconds INTEGER NOT NULL DEFAULT 1800,
+    jitter_pct INTEGER NOT NULL DEFAULT 10,
+    is_enabled INTEGER NOT NULL DEFAULT 1,
+    updated_at INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS pull_schedules (
+    id TEXT PRIMARY KEY,
+    label TEXT,
+    time_of_day TEXT NOT NULL,
+    days_of_week TEXT NOT NULL DEFAULT '*',
+    platforms_json TEXT NOT NULL,
+    is_enabled INTEGER NOT NULL DEFAULT 1,
+    grace_minutes INTEGER NOT NULL DEFAULT 30,
+    next_due_at INTEGER,
+    last_triggered_at INTEGER,
+    created_at INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS pull_runs (
+    id TEXT PRIMARY KEY,
+    schedule_id TEXT REFERENCES pull_schedules(id) ON DELETE SET NULL,
+    platform TEXT NOT NULL,
+    trigger_type TEXT NOT NULL,
+    started_at INTEGER NOT NULL,
+    completed_at INTEGER,
+    status TEXT NOT NULL,
+    total_fetched INTEGER NOT NULL DEFAULT 0,
+    new_projects_count INTEGER NOT NULL DEFAULT 0,
+    error_summary TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_pull_runs_started ON pull_runs(started_at DESC);
+
+  CREATE TABLE IF NOT EXISTS pull_stats_hourly (
+    hour_start INTEGER NOT NULL,
+    platform TEXT NOT NULL,
+    pulls INTEGER NOT NULL DEFAULT 0,
+    new_projects INTEGER NOT NULL DEFAULT 0,
+    errors INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (hour_start, platform)
+  );
+
+  CREATE TABLE IF NOT EXISTS project_status (
+    project_id INTEGER PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+    status TEXT NOT NULL DEFAULT 'unknown',
+    status_raw TEXT,
+    first_status TEXT,
+    changed_at INTEGER,
+    proposals_count INTEGER,
+    last_checked_at INTEGER,
+    next_check_at INTEGER,
+    checks_count INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE INDEX IF NOT EXISTS idx_status_value ON project_status(status);
+  CREATE INDEX IF NOT EXISTS idx_status_next ON project_status(next_check_at);
+
+  CREATE TABLE IF NOT EXISTS project_status_log (
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    checked_at INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    status_raw TEXT,
+    PRIMARY KEY (project_id, checked_at)
+  );
+
+  CREATE TABLE IF NOT EXISTS status_label_map (
+    platform TEXT NOT NULL,
+    raw_label TEXT NOT NULL,
+    canonical TEXT NOT NULL,
+    PRIMARY KEY (platform, raw_label)
+  );
+
+  CREATE TABLE IF NOT EXISTS sync_jobs (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    platforms_json TEXT NOT NULL,
+    range_from INTEGER,
+    range_to INTEGER,
+    include_details INTEGER NOT NULL DEFAULT 1,
+    state TEXT NOT NULL,
+    checkpoint_json TEXT,
+    progress_json TEXT,
+    created_at INTEGER NOT NULL,
+    started_at INTEGER,
+    finished_at INTEGER,
+    error_summary TEXT
+  );
   `
 ]
 

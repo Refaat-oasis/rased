@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { openDatabase, type Db } from '../src/storage/db.js'
-import { applyMigrations } from '../src/storage/migrations.js'
+import { applyMigrations, SCHEMA_VERSION } from '../src/storage/migrations.js'
 import {
   claimNotificationActivation,
   cleanupNotificationActivations,
@@ -112,7 +112,7 @@ describe('Notification origins and watch destinations', () => {
     expect(colsV10).not.toContain('origin')
 
     applyMigrations(dbMigrated)
-    expect((dbMigrated.prepare('PRAGMA user_version;').get() as { user_version: number }).user_version).toBe(11)
+    expect((dbMigrated.prepare('PRAGMA user_version;').get() as { user_version: number }).user_version).toBe(SCHEMA_VERSION)
     const colsV11 = dbMigrated.prepare('PRAGMA table_info(notification_activations)').all() as { name: string; dflt_value: string }[]
     const originMigrated = colsV11.find(c => c.name === 'origin')
     expect(originMigrated).toBeDefined()

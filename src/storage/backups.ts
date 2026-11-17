@@ -69,6 +69,10 @@ export function finalizeBackup(temporary: string, appVersion: string): Inspected
       copy.exec(`DELETE FROM diagnostics; DELETE FROM extension_jobs; DELETE FROM quick_apply_tickets; DELETE FROM notification_activations;
         DELETE FROM pending_classifications; DELETE FROM notification_batches;
         DELETE FROM watch_episode_member; DELETE FROM watch_episode; DELETE FROM watch_source_state;
+        DELETE FROM sync_jobs; DELETE FROM pull_runs; DELETE FROM pull_stats_hourly;
+        DELETE FROM daily_stats; DELETE FROM daily_coverage; DELETE FROM term_stats_daily; DELETE FROM emerging_topics;
+        DELETE FROM project_status_log;
+        DELETE FROM project_labels WHERE source != 'user';
         UPDATE notification_events SET status='suppressed' WHERE status IN ('pending','dispatching','uncertain');
         UPDATE notification_events SET session_id=NULL, batch_key=NULL, episode_id=NULL;
         UPDATE project_watch SET last_error=NULL;
@@ -88,6 +92,8 @@ export function finalizeBackup(temporary: string, appVersion: string): Inspected
 
 const LEGACY_NOTIFICATION_EVENTS_SQL = "CREATE TABLE notification_events ( id INTEGER PRIMARY KEY AUTOINCREMENT, project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE, kind TEXT NOT NULL DEFAULT 'new_project', status TEXT NOT NULL DEFAULT 'pending', session_id TEXT NULL, attempted_at TEXT NULL, batch_key TEXT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(project_id, kind) )"
 const LEGACY_NOTIFICATION_ACTIVATIONS_SQL = 'CREATE TABLE notification_activations ( token_hash TEXT PRIMARY KEY, url TEXT NOT NULL, project_id INTEGER NULL, expires_at INTEGER NOT NULL, last_attempt_at INTEGER NULL )'
+const LEGACY_PROJECTS_SQL_V11 = "CREATE TABLE projects ( id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT NOT NULL DEFAULT 'mostaql', external_id TEXT NOT NULL, url TEXT NOT NULL, title TEXT NOT NULL, description_excerpt TEXT NOT NULL DEFAULT '', published_at TEXT NULL, published_raw TEXT NULL, first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, discovery_kind TEXT NOT NULL, read_at TEXT NULL, category_slug TEXT NULL, category_name TEXT NULL, category_confirmed INTEGER NOT NULL DEFAULT 0, skills_json TEXT NULL, budget_min REAL NULL, budget_max REAL NULL, currency TEXT NULL, budget_raw TEXT NULL, enrichment_status TEXT NOT NULL DEFAULT 'not_requested', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, platform_status TEXT NULL, duration_days INTEGER NULL, duration_raw TEXT NULL, UNIQUE(source, external_id) )"
+
 
 let expectedSchema: Map<string, string> | null = null
 function referenceSchema(): Map<string, string> {
@@ -116,7 +122,7 @@ export function inspectBackup(file: string): InspectedBackup {
     if (version > SCHEMA_VERSION) throw Error('newer-schema')
     // Schema 9 adds only non-portable notification activation tickets. Existing
     // schema-8 archives remain valid and contain every durable table we restore.
-    if (![8,9,10,SCHEMA_VERSION].includes(version)) throw Error('bad-schema')
+    if (![8,9,10,11,SCHEMA_VERSION].includes(version)) throw Error('bad-schema')
     const schema = db.prepare("SELECT name,type,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'").all() as unknown as { name: string; type: string; sql: string | null }[]
     const expected = new Map(referenceSchema())
     if (version === 8) expected.delete('notification_activations')
@@ -125,6 +131,15 @@ export function inspectBackup(file: string): InspectedBackup {
       for (const name of ['project_watch', 'watch_source_state', 'watch_episode', 'watch_episode_member']) expected.delete(name)
       expected.set('notification_events', LEGACY_NOTIFICATION_EVENTS_SQL)
       if (version >= 9) expected.set('notification_activations', LEGACY_NOTIFICATION_ACTIVATIONS_SQL)
+    }
+    if (version < 12) {
+      for (const name of [
+        'project_facts_norm', 'taxonomy_nodes', 'taxonomy_keywords', 'taxonomy_inferences',
+        'project_labels', 'project_nlp_state', 'daily_stats', 'daily_coverage', 'term_stats_daily',
+        'emerging_topics', 'analytics_presets', 'pull_policy', 'pull_schedules', 'pull_runs',
+        'pull_stats_hourly', 'project_status', 'project_status_log', 'status_label_map', 'sync_jobs'
+      ]) expected.delete(name)
+      expected.set('projects', LEGACY_PROJECTS_SQL_V11)
     }
     for (const item of schema) {
       if (!['table','index','trigger'].includes(item.type)) throw Error('bad-schema')
@@ -157,6 +172,10 @@ export function inspectBackup(file: string): InspectedBackup {
       `).get()
       if (badWatchTime) throw Error('bad-schema')
     }
+    if (version >= 12) {
+      if (db.prepare('SELECT 1 FROM sync_jobs LIMIT 1').get() || db.prepare('SELECT 1 FROM pull_runs LIMIT 1').get() || db.prepare('SELECT 1 FROM pull_stats_hourly LIMIT 1').get()) throw Error('bad-schema')
+      if (db.prepare('SELECT 1 FROM daily_stats LIMIT 1').get() || db.prepare('SELECT 1 FROM daily_coverage LIMIT 1').get() || db.prepare('SELECT 1 FROM term_stats_daily LIMIT 1').get() || db.prepare('SELECT 1 FROM emerging_topics LIMIT 1').get()) throw Error('bad-schema')
+    }
     const settings = JSON.parse(getSettingRaw(db, 'app') ?? 'null') as unknown
     const rawProfiles = getSettingRaw(db, 'proposal-profiles')
     const profiles = rawProfiles === null ? undefined : sanitizeProfileSet(JSON.parse(rawProfiles))
@@ -178,9 +197,25 @@ export function restoreDatabase(db: Db, file: string, applyStartup: boolean, res
         DELETE FROM pending_classifications; DELETE FROM extension_jobs; DELETE FROM quick_apply_tickets; DELETE FROM notification_activations;
         DELETE FROM notification_events; DELETE FROM notification_batches; DELETE FROM proposal_drafts;
         DELETE FROM project_details; DELETE FROM project_user_state; DELETE FROM projects;
-        DELETE FROM saved_filters; DELETE FROM tombstones; DELETE FROM source_state;`)
-      const hasProjectWatch = !!db.prepare("SELECT 1 FROM restore_data.sqlite_schema WHERE type='table' AND name='project_watch'").get()
-      const tablesToRestore = hasProjectWatch ? [...TABLES, 'project_watch'] : [...TABLES]
+        DELETE FROM saved_filters; DELETE FROM tombstones; DELETE FROM source_state;
+        DELETE FROM sync_jobs; DELETE FROM pull_runs; DELETE FROM pull_stats_hourly;
+        DELETE FROM daily_stats; DELETE FROM daily_coverage; DELETE FROM term_stats_daily; DELETE FROM emerging_topics;
+        DELETE FROM project_status_log; DELETE FROM project_status;
+        DELETE FROM project_nlp_state; DELETE FROM project_labels;
+        DELETE FROM taxonomy_inferences; DELETE FROM taxonomy_keywords; DELETE FROM taxonomy_nodes;
+        DELETE FROM analytics_presets; DELETE FROM pull_schedules; DELETE FROM pull_policy; DELETE FROM status_label_map;
+        DELETE FROM project_facts_norm;`)
+      const optionalTables = [
+        'project_watch', 'taxonomy_nodes', 'taxonomy_keywords', 'taxonomy_inferences',
+        'analytics_presets', 'pull_policy', 'pull_schedules', 'status_label_map',
+        'project_facts_norm', 'project_status', 'project_labels'
+      ]
+      const tablesToRestore: string[] = [...TABLES]
+      for (const opt of optionalTables) {
+        if (db.prepare(`SELECT 1 FROM restore_data.sqlite_schema WHERE type='table' AND name='${opt}'`).get()) {
+          tablesToRestore.push(opt)
+        }
+      }
       for (const table of tablesToRestore) {
         const mainCols = new Set((db.prepare(`PRAGMA main.table_info(${table})`).all() as unknown as { name: string }[]).map(row => row.name))
         const archiveCols = (db.prepare(`PRAGMA restore_data.table_info(${table})`).all() as unknown as { name: string }[]).map(row => row.name)
